@@ -26,6 +26,7 @@ separately.
 - [Build Silo](#build-silo)
 - [First startup](#first-startup)
 - [Commands](#commands)
+- [HTTP and HTTPS](#http-and-https)
 - [Runtime and database](#runtime-and-database)
 - [Configuration and state](#configuration-and-state)
 - [Troubleshooting](#troubleshooting)
@@ -188,6 +189,7 @@ Older layouts without these markers are not supported by this first slice.
 | `silo up -d` | Start in the background and wait for Compose readiness |
 | `silo up --detach` | Same as `silo up -d` |
 | `silo up -d --port 8087` | Set or change this project's saved HTTP port |
+| `silo up -d --https-port 18443` | Enable HTTPS alongside HTTP, or change its saved port |
 | `silo ps` | Show this project's containers |
 | `silo down` | Remove this project's containers/network; keep database volume and Silo state |
 
@@ -202,6 +204,77 @@ behavior is delegated to Docker Compose.
 There is deliberately no generic Compose passthrough in this version.
 Unsupported commands and flags, including `silo down -v`, are rejected.
 
+## HTTP and HTTPS
+
+HTTP remains supported on its saved port. To enable HTTPS as well:
+
+```powershell
+silo up -d --port 18080 --https-port 18443
+```
+
+Both endpoints are then available:
+
+```text
+http://127.0.0.1:18080/
+https://127.0.0.1:18443/
+```
+
+`localhost` can also be used. Both ports bind to IPv4 loopback only and must be
+different and available. Assign different HTTP/HTTPS port pairs to concurrent
+projects. The HTTPS port is remembered: later `silo up -d` keeps both protocols.
+`--https-port N` changes the HTTPS port without changing HTTP; `--port N` changes
+HTTP without disabling HTTPS. HTTPS is opt-in and has no automatic disable flag
+in this version; passing zero is rejected.
+
+Silo itself does not force HTTP to HTTPS. It serves the application on both
+protocols and PHP sees the actual TLS state. If the application redirects from
+HTTP to HTTPS while retaining the incoming HTTP port, Apache maps that local
+`Location` header to the saved HTTPS port. The inverse mapping also works.
+Only absolute `127.0.0.1`/`localhost` redirects with the corresponding source
+port are adjusted; external hostnames, already-correct URLs and response bodies
+are not rewritten. Production domain redirects or hardcoded links require
+application configuration. An HTTP-only site continues to work over HTTP.
+
+### Trust the local certificate
+
+Silo generates a separate local CA for each project and a certificate for
+`localhost`, `127.0.0.1` and `::1`. TLS uses Apache directly, without a reverse
+proxy. Existing environments are upgraded in external state; DB content,
+credentials and the backup initialization marker are retained.
+
+Until you trust that project's CA, a browser will report an untrusted issuer.
+Silo **does not install trust automatically**. After the first HTTPS startup,
+use the CA path printed by Silo. In PowerShell:
+
+```powershell
+# Replace PROJECT_ID (and the state root if SILO_HOME is customized).
+$ca = "$env:USERPROFILE\.silo\projects\PROJECT_ID\tls\ca.crt"
+Import-Certificate -FilePath $ca -CertStoreLocation Cert:\CurrentUser\Root
+```
+
+This adds the CA to the current Windows user's trusted roots. Import only the
+public `ca.crt`; keep `ca.key` private. Restart the browser if needed. Some
+browsers use a separate certificate store and require their own CA import.
+For WSL-hosted state, import its public CA into the Windows store if the browser
+runs on Windows. On Linux/macOS, import it into the OS/browser trust store using
+the normal certificate-management tools for that system.
+
+The CA stays stable when ports change. Leaf certificates are renewed on `up`
+when fewer than 30 days remain; the web container is recreated when its
+certificate or TLS configuration changes. An incomplete/expired CA is reported
+instead of silently replacing a previously trusted authority. To revoke trust,
+remove that specific `Silo local CA <project-id>` from your certificate store.
+
+For command-line verification without changing a trust store:
+
+```powershell
+curl.exe --cacert $ca https://127.0.0.1:18443/
+```
+
+`https://127.0.0.1:18080/` is incorrect when 18080 is the HTTP port and results in
+`ERR_SSL_PROTOCOL_ERROR`. Use the printed HTTPS URL. A browser-cached redirect
+from an earlier HTTP-only session may need clearing.
+
 ## Runtime and database
 
 ### Web service
@@ -209,8 +282,11 @@ Unsupported commands and flags, including `silo down -v`, are rejected.
 - PHP 8.4 and Apache with `mod_rewrite`.
 - PHP extensions: GD, mysqli, PDO MySQL, ZIP, mbstring and intl, in addition to
   the base PHP image's extensions.
+- GD includes JPEG, PNG, FreeType and WebP support (`imagewebp`). Running `silo up`
+  after updating Silo refreshes the generated Dockerfile and rebuilds changed
+  runtime layers for existing HTTP and HTTPS environments; database data is retained.
 - Application bind-mounted at `/var/www/html`.
-- HTTP exposed on `127.0.0.1` only.
+- HTTP and optional HTTPS exposed on `127.0.0.1` only.
 - Upload/post limit: 100 MB; memory limit: 256 MB; timezone: UTC.
 - Runtime build context extracted from the CLI into external state.
 
@@ -356,6 +432,10 @@ context and authentication settings are preserved.
 
 State creation is staged and protected by a project lock. Existing damaged or
 incompatible state causes an error instead of silently replacing credentials.
+With HTTPS enabled, `tls/` also contains `ca.crt`, `ca.key`, `server.crt`,
+`server.key` and `apache.conf`. Only the leaf certificate/key and Apache config
+are mounted read-only into the web container; the CA private key stays on the
+host. These files are never written to the application.
 
 ## Troubleshooting
 
@@ -371,6 +451,8 @@ incompatible state causes an error instead of silently replacing credentials.
 | Missing `core/vendor/autoload.php` | Install the application's PHP dependencies separately; Silo does not do this automatically |
 | Port already allocated | Retry `silo up -d --port 18080` with a free port; other projects are not stopped |
 | Need another HTTP port | Run `silo up -d --port N`; the new port is saved for future starts |
+| HTTPS protocol error | Use the saved HTTPS port, not the HTTP port; enable it with `--https-port N` |
+| Certificate issuer not trusted | Import this project's public `tls/ca.crt` into the browser/OS trust store |
 | Backup import failed/incomplete | Web startup is blocked; inspect the local partial database and backup before recovery |
 | Image pull/build fails | Check access to ECR Public/Debian mirrors and available Docker disk space |
 | Containers run but site fails | Check application dependencies, local DB content, config and logs; container readiness is not CMS acceptance |
@@ -437,7 +519,7 @@ and [validation](docs/validation.md) for the checks actually performed.
 
 Implemented: project discovery, external state, PHP 8.4/Apache, MariaDB 11.4,
 diagnostics, lifecycle commands, saved-port changes, first database backup restore
-and isolated test coverage.
+and simultaneous HTTP/HTTPS with local certificates and isolated test coverage.
 
 Planned separately: additional runtimes, nginx/FrankenPHP/Xdebug, service
 selection, shell/PHP/Composer/Node/database command proxies, Podman, GHCR

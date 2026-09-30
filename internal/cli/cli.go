@@ -24,7 +24,7 @@ const usage = `Silo — standalone local environments for Evolution CMS
 Usage:
   silo version
   silo doctor
-  silo up [-d|--detach] [--port 8080]
+  silo up [-d|--detach] [--port 8080] [--https-port 8443]
   silo ps
   silo down
 
@@ -32,6 +32,7 @@ Run from an Evolution project or any directory below it.
 State: ~/.silo (override with an absolute external SILO_HOME).
 HTTP: http://127.0.0.1:8080 by default; --port sets or changes the saved port.
 Use a different port for each project running at the same time.
+HTTPS: --https-port enables local TLS and saves its port; trust the printed CA separately.
 down retains database data. No application configuration is generated.
 `
 
@@ -72,10 +73,12 @@ func execute(args []string, version, cwd, home string, d driver, out io.Writer) 
 	flags.Usage = func() { fmt.Fprint(out, usage) }
 	var detach bool
 	var port int
+	var httpsPort int
 	if command == "up" {
 		flags.BoolVar(&detach, "d", false, "start in background")
 		flags.BoolVar(&detach, "detach", false, "start in background")
 		flags.IntVar(&port, "port", 0, "set or change HTTP port (saved per project; initial default 8080)")
+		flags.IntVar(&httpsPort, "https-port", 0, "enable HTTPS or change its saved port")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -87,13 +90,20 @@ func execute(args []string, version, cwd, home string, d driver, out io.Writer) 
 		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
 	portSet := false
+	httpsSet := false
 	flags.Visit(func(f *flag.Flag) {
 		if f.Name == "port" {
 			portSet = true
 		}
+		if f.Name == "https-port" {
+			httpsSet = true
+		}
 	})
 	if portSet && (port < 1 || port > 65535) {
 		return errors.New("--port must be between 1 and 65535")
+	}
+	if httpsSet && (httpsPort < 1 || httpsPort > 65535) {
+		return errors.New("--https-port must be between 1 and 65535")
 	}
 	if command == "version" {
 		fmt.Fprintf(out, "silo %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
@@ -139,11 +149,30 @@ func execute(args []string, version, cwd, home string, d driver, out io.Writer) 
 	if command == "down" {
 		return d.Compose(s.Dir, p.ID, "down")
 	}
+	if httpsSet {
+		httpPort := port
+		if httpPort == 0 {
+			httpPort = 8080
+			if saved, err := s.Load(); err == nil {
+				httpPort = saved.Port
+			}
+		}
+		if httpPort == httpsPort {
+			return errors.New("HTTP and HTTPS ports must differ")
+		}
+	}
 	m, err := s.Ensure(port)
 	if err != nil {
 		return err
 	}
+	m, err = s.EnableHTTPS(httpsPort)
+	if err != nil {
+		return err
+	}
 	fmt.Fprintf(out, "Project: %s\nState: %s\nHTTP: http://127.0.0.1:%d\n", p.Root, s.Dir, m.Port)
+	if m.HTTPSPort != 0 {
+		fmt.Fprintf(out, "HTTPS: https://127.0.0.1:%d\nLocal CA (trust separately): %s\n", m.HTTPSPort, filepath.Join(s.Dir, "tls", "ca.crt"))
+	}
 	fmt.Fprintln(out, "Database: isolated local volume; newest backup is restored only on first initialization.")
 	if err := d.Compose(s.Dir, p.ID, "config", "--quiet"); err != nil {
 		return fmt.Errorf("invalid Compose configuration: %w", err)

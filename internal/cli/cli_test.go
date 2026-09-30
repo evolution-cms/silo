@@ -112,7 +112,7 @@ func TestLifecycleReusesStateAndKeepsDownNonDestructive(t *testing.T) {
 
 func TestFailuresAndReadOnlyCommandsDoNotCreateState(t *testing.T) {
 	root := app(t)
-	for _, args := range [][]string{{"ps"}, {"down"}, {"up", "--port", "0"}, {"up", "--port", "65536"}, {"down", "-v"}, {"up", "unexpected"}} {
+	for _, args := range [][]string{{"ps"}, {"down"}, {"up", "--port", "0"}, {"up", "--port", "65536"}, {"up", "--https-port", "0"}, {"up", "--https-port", "65536"}, {"up", "--port", "8080", "--https-port", "8080"}, {"down", "-v"}, {"up", "unexpected"}} {
 		home := filepath.Join(t.TempDir(), "not-created")
 		d := &fakeDocker{failure: errors.New("daemon unavailable")}
 		var out bytes.Buffer

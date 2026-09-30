@@ -74,3 +74,24 @@ a pending marker, no web startup and no automatic retry on the next `up`.
 The real site's backup is not imported by this development/test workflow; its
 first run remains a user-controlled step. Unit tests, vet, all five cross-builds
 and the local Windows executable were refreshed for these changes.
+
+## Simultaneous HTTP and HTTPS
+
+`TestDockerHTTPS` passed against Docker Desktop with certificate verification
+enabled in the test client. Its trusted roots were scoped to that client; no CA
+was installed in Windows or a browser. The test checks:
+
+- migration of a running HTTP-only environment to HTTP plus HTTPS;
+- HTTP returns an ordinary application response without a Silo-forced redirect;
+- trusted TLS connections work for both `127.0.0.1` and `localhost`;
+- PHP reports the actual protocol;
+- application redirects map HTTP-to-HTTPS and HTTPS-to-HTTP ports while retaining
+  path/query components;
+- either port can change without disabling the other protocol;
+- both saved ports work after `down` and a subsequent `up` without flags;
+- the application fixture remains unchanged.
+
+State tests verify certificate chains/SANs, stable CA and credentials, TLS port
+collision rejection, stable repeated generation and exclusion of the CA private
+key from Compose mounts. Trust-store installation and a real browser's trust
+behavior remain explicit user-side steps, not claims of this integration test.

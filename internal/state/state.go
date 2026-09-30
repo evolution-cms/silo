@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,10 +27,11 @@ const RuntimeImage = "silo-runtime:8.4-apache-v1"
 const DatabaseImage = "public.ecr.aws/docker/library/mariadb:11.4"
 
 type Metadata struct {
-	Schema  int             `json:"schema"`
-	Project project.Project `json:"project"`
-	Port    int             `json:"port"`
-	Runtime string          `json:"runtime"`
+	Schema    int             `json:"schema"`
+	Project   project.Project `json:"project"`
+	Port      int             `json:"port"`
+	Runtime   string          `json:"runtime"`
+	HTTPSPort int             `json:"https_port,omitempty"`
 }
 
 type Store struct {
@@ -128,7 +130,7 @@ func (s Store) Load() (Metadata, error) {
 	if err = json.Unmarshal(data, &m); err != nil {
 		return m, fmt.Errorf("invalid state metadata: %w", err)
 	}
-	if m.Schema != Schema || m.Project != s.Project || m.Runtime != RuntimeImage || m.Port < 1 || m.Port > 65535 {
+	if m.Schema != Schema || m.Project != s.Project || (m.Runtime != RuntimeImage && m.Runtime != TLSRuntimeImage) || m.Port < 1 || m.Port > 65535 || m.HTTPSPort < 0 || m.HTTPSPort > 65535 || m.Port == m.HTTPSPort {
 		return m, errors.New("state metadata is incompatible with this project or Silo version; preserve state and investigate before restarting")
 	}
 	for _, name := range []string{"compose.yaml", "environment", "runtime/Dockerfile", "runtime/php.ini"} {
@@ -221,6 +223,9 @@ func (s Store) Ensure(port int) (Metadata, error) {
 // Metadata is the committed port: an interrupted two-file update is reconciled
 // on the next up, including up without --port. Docker is called only afterwards.
 func (s Store) updatePort(m Metadata, port int) (Metadata, error) {
+	if port == m.HTTPSPort {
+		return m, errors.New("HTTP port must differ from the saved HTTPS port")
+	}
 	composePath := filepath.Join(s.Dir, "compose.yaml")
 	original, err := os.ReadFile(composePath)
 	if err != nil {
@@ -234,12 +239,14 @@ func (s Store) updatePort(m Metadata, port int) (Metadata, error) {
 		json.Unmarshal(services["web"], &web) != nil || web == nil {
 		return m, errors.New("cannot update HTTP port: expected Silo-generated JSON Compose with a web service")
 	}
-	binding := "127.0.0.1:" + strconv.Itoa(port) + ":80"
+	next := m
+	next.Port = port
+	ports := bindings(next)
 	var current []string
-	if json.Unmarshal(web["ports"], &current) == nil && len(current) == 1 && current[0] == binding && m.Port == port {
+	if json.Unmarshal(web["ports"], &current) == nil && slices.Equal(current, ports) && m.Port == port {
 		return m, nil
 	}
-	web["ports"], _ = json.Marshal([]string{binding})
+	web["ports"], _ = json.Marshal(ports)
 	services["web"], err = json.Marshal(web)
 	if err != nil {
 		return m, err
@@ -252,8 +259,6 @@ func (s Store) updatePort(m Metadata, port int) (Metadata, error) {
 	if err != nil {
 		return m, err
 	}
-	next := m
-	next.Port = port
 	metadata, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
 		return m, err
