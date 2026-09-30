@@ -16,8 +16,8 @@ under `~/.silo`.
 **Status:** initial development version (`0.1.0-dev`). Build from source for now;
 there is no published binary release, installer or self-update command yet.
 The current runtime is **PHP 8.4 + Apache + MariaDB 11.4**. This starts an
-environment for an existing project; it does not install the CMS or restore its
-database. Full compatibility with an individual application must be checked
+environment for an existing project and can restore its latest local SQL backup
+on first database initialization. It does not install the CMS. Full compatibility with an individual application must be checked
 separately.
 
 ## Contents
@@ -116,22 +116,44 @@ and produces separate database volumes.
 
 1. Start Docker and select Linux containers.
 2. Open a terminal in your existing Evolution application.
+   For an existing site, place its SQL backup in `assets/backup` before first startup.
 3. Run `silo doctor` and resolve any `[FAIL]` checks.
 4. Run `silo up -d`.
 5. Open **http://127.0.0.1:8080**.
 6. Use `silo ps` to inspect services and `silo down` to stop them.
 
-If port 8080 is already used, choose a different port **on the first startup**:
+If port 8080 is already used, choose a different port on first startup or change
+the port of an existing environment with the same command:
 
 ```sh
 silo up -d --port 8087
 ```
 
 Then open `http://127.0.0.1:8087`. Silo remembers the port; subsequent starts use
-`silo up -d`. Different projects need different HTTP ports when running together.
-Automatic port selection and changing an existing environment's port are not
-implemented yet. Passing a different `--port` to existing state fails instead of
-silently changing infrastructure.
+`silo up -d`. Compose recreates the web container when its port changes; database
+content, credentials and project identity remain intact. No preliminary `down`
+is required. A brief HTTP interruption is expected while the web container is
+recreated. If startup fails, the selected port remains saved; retry with another
+`--port` if necessary. Automatic port selection is not implemented.
+
+### Run several projects at once
+
+Give each project a different HTTP port. For example, in PowerShell with `silo`
+on `PATH`:
+
+```powershell
+cd H:\Projects\site-one
+silo up -d --port 18080
+
+cd H:\Projects\site-two
+silo up -d --port 18081
+```
+
+Each project has its own containers, network, database volume, credentials and
+saved port, even when directory basenames match. The PHP runtime image/build
+cache can be shared. `silo down` affects only the project selected by the current
+directory. HTTP ports must be unique; database ports remain internal and do not
+conflict. Silo does not stop another project to free an occupied port.
 
 The first build takes longer than later startups. Detached startup waits for
 Compose readiness; a ready container alone does not prove that the CMS has its
@@ -165,7 +187,7 @@ Older layouts without these markers are not supported by this first slice.
 | `silo up` | Create/reuse external state and start with attached Compose logs |
 | `silo up -d` | Start in the background and wait for Compose readiness |
 | `silo up --detach` | Same as `silo up -d` |
-| `silo up -d --port 8087` | Select HTTP port when creating an environment |
+| `silo up -d --port 8087` | Set or change this project's saved HTTP port |
 | `silo ps` | Show this project's containers |
 | `silo down` | Remove this project's containers/network; keep database volume and Silo state |
 
@@ -222,8 +244,40 @@ the same database and credentials. Preserve the external `environment` file
 alongside the database volume; manually deleting state can leave an existing
 volume whose credentials no longer match newly-generated ones.
 
-An existing site's content is not imported. Silo does not run database migrations,
-the Evolution installer, Composer scripts or arbitrary project commands.
+### Automatic first database restore
+
+Before starting the web service, Silo starts MariaDB and waits for it to become
+ready. On the first bootstrap of an empty database, it checks `assets/backup`:
+
+- Supported files: regular, nonempty `.sql` and `.sql.gz` files directly in that
+  directory. Symlink files, ZIP archives and other file types are ignored.
+- The newest file is selected by **last modification time**; equal timestamps
+  are resolved by filename, choosing the lexicographically last name. Preserve
+  backup timestamps when copying, or leave only the intended backup there.
+- SQL streams directly to the local MariaDB service. Gzip decompression is also
+  streamed; the dump is not copied into Silo state or unpacked into the project.
+- The project DB account is used. Dumps should target the selected database
+  without `CREATE DATABASE`/`USE` directives naming another database, and should
+  not require server-administrator privileges. Silo does not rewrite SQL.
+- Existing tables are never overwritten automatically. Already-initialized
+  databases are skipped, including after changing a port or running `down`.
+- If there is no supported backup, Silo records initialization and starts with
+  an empty DB. Adding a backup later does **not** trigger an automatic import.
+
+Bootstrap markers live in the database volume, not just in Silo metadata.
+Existing volumes created by an earlier Silo version can be bootstrapped if they
+have no marker and contain no tables. A populated legacy volume is marked as
+initialized without importing anything.
+
+If an import fails or is interrupted, Silo retains partial data and blocks
+automatic retry/web startup. It does not delete tables or retry another backup.
+Inspect and recover that isolated database deliberately; do not remove its
+pending marker to retry against partial data. SQL-client output is suppressed
+during import because failed statements can contain private site data.
+
+Successful SQL import does not rewrite site URLs, run migrations, run the
+Evolution installer, execute Composer scripts or fix application-specific PHP
+configuration. Those remain separate integration steps.
 
 Evolution configurations that use immutable dotenv/environment values can use
 these container settings without rewriting `.env`. Hardcoded PHP DB connection
@@ -315,8 +369,9 @@ incompatible state causes an error instead of silently replacing credentials.
 | WSL2 not detected | Use WSL2 and enable Docker Desktop integration for that distribution |
 | No Evolution project found | Change to the application directory and verify the detection markers |
 | Missing `core/vendor/autoload.php` | Install the application's PHP dependencies separately; Silo does not do this automatically |
-| Port already allocated | Stop the conflicting service, or choose `--port` before first creating another environment |
-| Existing environment uses another port | Reuse its saved port; automatic reconfiguration is not implemented |
+| Port already allocated | Retry `silo up -d --port 18080` with a free port; other projects are not stopped |
+| Need another HTTP port | Run `silo up -d --port N`; the new port is saved for future starts |
+| Backup import failed/incomplete | Web startup is blocked; inspect the local partial database and backup before recovery |
 | Image pull/build fails | Check access to ECR Public/Debian mirrors and available Docker disk space |
 | Containers run but site fails | Check application dependencies, local DB content, config and logs; container readiness is not CMS acceptance |
 | Cannot lock project state | Another lifecycle command may be running; wait for it to finish |
@@ -352,12 +407,13 @@ go build -o ./bin/silo ./cmd/silo
 
 The opt-in Docker integration test creates its own temporary Evolution-shaped
 PHP fixture. It does not read or run an existing site. It builds the runtime,
-tests HTTP/rewrite, PHP extensions, MariaDB connectivity, database persistence,
-and unchanged fixture files. It removes only its own containers and database
-volume after the test. Downloaded images/build cache remain available.
+tests HTTP/rewrite, PHP extensions, one-time backup restore, live port changes,
+MariaDB persistence and two projects running concurrently without changing their
+fixture files. It removes only its own containers and database volumes after the
+test. Downloaded images/build cache remain available.
 
 ```sh
-SILO_INTEGRATION=1 go test ./internal/cli -run '^TestDockerLifecycle$' -v -timeout 30m
+SILO_INTEGRATION=1 go test ./internal/cli -run '^TestDocker' -v -timeout 30m
 ```
 
 PowerShell equivalent:
@@ -365,7 +421,7 @@ PowerShell equivalent:
 ```powershell
 $env:SILO_INTEGRATION = '1'
 try {
-    go test ./internal/cli -run '^TestDockerLifecycle$' -v -timeout 30m
+    go test ./internal/cli -run '^TestDocker' -v -timeout 30m
 } finally {
     Remove-Item Env:SILO_INTEGRATION
 }
@@ -380,11 +436,12 @@ and [validation](docs/validation.md) for the checks actually performed.
 ## Current scope
 
 Implemented: project discovery, external state, PHP 8.4/Apache, MariaDB 11.4,
-diagnostics, lifecycle commands and isolated test coverage.
+diagnostics, lifecycle commands, saved-port changes, first database backup restore
+and isolated test coverage.
 
 Planned separately: additional runtimes, nginx/FrankenPHP/Xdebug, service
 selection, shell/PHP/Composer/Node/database command proxies, Podman, GHCR
-publishing, release binaries, installers, self-update, state reconfiguration
+publishing, release binaries, installers, self-update, broader state reconfiguration
 and optional project configuration. `.silo.yml` is not read by this version.
 
 Silo takes runtime lessons from [Salo2](https://github.com/evolution-cms/salo2)

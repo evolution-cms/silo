@@ -143,14 +143,18 @@ func (s Store) Load() (Metadata, error) {
 	return m, nil
 }
 
-// Ensure creates state once under a lifecycle lock. port=0 means retain/default.
+// Ensure creates or updates state under a lifecycle lock. port=0 retains the
+// saved port (or selects the initial default). Credentials never change here.
 func (s Store) Ensure(port int) (Metadata, error) {
+	if port < 0 || port > 65535 {
+		return Metadata{}, errors.New("HTTP port must be between 1 and 65535")
+	}
 	m, err := s.Load()
 	if err == nil {
-		if port != 0 && port != m.Port {
-			return m, fmt.Errorf("existing environment uses port %d; reuse it without --port (automatic state reconfiguration is not supported yet)", m.Port)
+		if port == 0 {
+			port = m.Port
 		}
-		return m, nil
+		return s.updatePort(m, port)
 	}
 	if _, statErr := os.Lstat(s.Dir); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
 		return m, fmt.Errorf("refusing to overwrite existing state: %w", err)
@@ -211,6 +215,78 @@ func (s Store) Ensure(port int) (Metadata, error) {
 		return m, err
 	}
 	return m, nil
+}
+
+// updatePort edits only the managed web binding, preserving other Compose fields.
+// Metadata is the committed port: an interrupted two-file update is reconciled
+// on the next up, including up without --port. Docker is called only afterwards.
+func (s Store) updatePort(m Metadata, port int) (Metadata, error) {
+	composePath := filepath.Join(s.Dir, "compose.yaml")
+	original, err := os.ReadFile(composePath)
+	if err != nil {
+		return m, err
+	}
+	var model map[string]json.RawMessage
+	var services map[string]json.RawMessage
+	var web map[string]json.RawMessage
+	if json.Unmarshal(original, &model) != nil ||
+		json.Unmarshal(model["services"], &services) != nil ||
+		json.Unmarshal(services["web"], &web) != nil || web == nil {
+		return m, errors.New("cannot update HTTP port: expected Silo-generated JSON Compose with a web service")
+	}
+	binding := "127.0.0.1:" + strconv.Itoa(port) + ":80"
+	var current []string
+	if json.Unmarshal(web["ports"], &current) == nil && len(current) == 1 && current[0] == binding && m.Port == port {
+		return m, nil
+	}
+	web["ports"], _ = json.Marshal([]string{binding})
+	services["web"], err = json.Marshal(web)
+	if err != nil {
+		return m, err
+	}
+	model["services"], err = json.Marshal(services)
+	if err != nil {
+		return m, err
+	}
+	updated, err := json.MarshalIndent(model, "", "  ")
+	if err != nil {
+		return m, err
+	}
+	next := m
+	next.Port = port
+	metadata, err := json.MarshalIndent(next, "", "  ")
+	if err != nil {
+		return m, err
+	}
+	if err := replaceFile(composePath, updated); err != nil {
+		return m, err
+	}
+	if err := replaceFile(filepath.Join(s.Dir, "metadata.json"), metadata); err != nil {
+		rollbackErr := replaceFile(composePath, original)
+		return m, fmt.Errorf("cannot save HTTP port: %w", errors.Join(err, rollbackErr))
+	}
+	return next, nil
+}
+
+// replaceFile stages complete contents beside the destination before replacing it.
+func replaceFile(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".silo-update-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 func secret() (string, error) {

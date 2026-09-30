@@ -29,6 +29,7 @@ cmd/silo/           process entry point and exit status
 internal/cli/       command parsing, doctor, lifecycle orchestration
 internal/project/   read-only project detection and canonical identity
 internal/state/     external state, credentials, Compose and runtime assets
+internal/bootstrap/ first database initialization and streaming SQL restore
 internal/docker/    direct Docker subprocess execution, no shell evaluation
 ```
 
@@ -65,7 +66,11 @@ operations. Attached `up` releases it after configuration validation so `down`
 can run from another terminal while logs remain attached. A complete new state
 is staged in a sibling directory and renamed into place. Existing state is
 reused, never silently regenerated: especially credentials and database volume
-identity. Unsupported schema or changed port fails with an actionable message.
+identity. Unsupported schema fails with an actionable message. Explicit `--port`
+changes only the managed web binding and saved port, preserving other Compose
+fields, runtime files and credentials. Complete replacement files are staged
+beside their destinations. If saving metadata fails, Compose is rolled back;
+after interruption, the next `up` reconciles the binding with committed metadata.
 `ps` and `down` never create state. `down` retains state and database volumes;
 there is no destructive volume removal command in this slice.
 On Windows permissions follow the user's profile ACL; POSIX modes are not an
@@ -84,7 +89,8 @@ Future GitHub Actions can publish `ghcr.io/evolution-cms/silo:8.4-apache` and
 replace the local build without changing the application contract.
 
 HTTP binds only to `127.0.0.1`, default port 8080; `up --port N` selects another
-port at first creation. MariaDB is internal to the Compose network and has a
+port at creation or on any later startup. Compose applies the changed binding by
+recreating the web service without removing the database volume. MariaDB is internal to the Compose network and has a
 named persistent volume plus a readiness healthcheck. The web service waits
 for database readiness. Projects use separate Compose names/networks/volumes.
 
@@ -93,9 +99,19 @@ DB_PASSWORD and APP_ENV. It does not read or copy production secrets. The option
 `core/custom/.env.docker.example` may supply a simple DB_DATABASE name; credentials
 are always generated. Project env files are never shell-sourced or rewritten.
 Existing hardcoded PHP database configuration cannot be overridden generically;
-such projects need an explicit application-specific follow-up. Database content
-is not imported, migrations/installers/Composer scripts are not run automatically.
-A running environment is not proof that an existing application's DB is restored.
+such projects need an explicit application-specific follow-up. Before web startup,
+Silo starts the DB alone and checks its bootstrap marker and table count. An empty,
+unmarked DB receives the newest regular nonempty `.sql`/`.sql.gz` backup from
+`assets/backup` (mtime, then filename). Input is streamed as the project DB user
+with client binary mode enabled; SQL and credentials are never placed in argv.
+No SQL rewriting or cross-database restore is attempted. A pending marker in the
+DB volume blocks retry after interruption; a completed marker prevents future
+imports even if a newer backup appears. A populated DB or an empty DB without a
+backup is marked complete without importing. Markers also support safe adoption
+of an empty volume created before this feature. SQL-client error output is not
+echoed because it may include private records. Migrations/installers/Composer
+scripts are not run automatically. A restored DB alone does not establish full
+application compatibility.
 
 The bind mount is writable for normal CMS operation, so application cache/log/
 upload writes can occur. The guarantee is that Silo creates no infrastructure or

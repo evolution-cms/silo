@@ -51,3 +51,26 @@ No real site is started, migrated or imported by these checks.
   build at `bin/silo.exe` is ignored by Git.
 
 See the [README](../README.md#development-and-tests) for reproducible commands.
+
+## Port changes and first database restore
+
+The extended suite checks explicit port changes on an existing environment,
+including saved-port reuse, preservation of unrelated Compose fields, credential
+stability, recovery after an interrupted state update and rollback on a metadata
+write failure. Backup unit tests cover newest-file selection, gzip reading,
+missing backups, existing tables, completion markers and blocked retries.
+
+The Docker lifecycle test now runs two independent projects with the same
+directory basename under one `SILO_HOME`. It verifies initial restore from plain
+SQL and gzip, changes one running project's port, checks that the old binding is
+released, and confirms that both projects retain separate data. Stopping the first
+project leaves the second available; restarting it reuses the new port without
+reimporting the backup. Both application fixture snapshots remain unchanged.
+
+`TestDockerImportFailure` uses a deliberately broken test dump after one table
+and row have been created. Its acceptance conditions are retained partial data,
+a pending marker, no web startup and no automatic retry on the next `up`.
+
+The real site's backup is not imported by this development/test workflow; its
+first run remains a user-controlled step. Unit tests, vet, all five cross-builds
+and the local Windows executable were refreshed for these changes.

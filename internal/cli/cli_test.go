@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,6 +16,11 @@ type fakeDocker struct {
 	failure        error
 	composeFailure error
 	composeHook    func(string, []string)
+}
+
+func (d *fakeDocker) ComposeIO(dir, id string, in io.Reader, out, stderr io.Writer, args ...string) error {
+	_, err := io.WriteString(out, "complete")
+	return err
 }
 
 func (d *fakeDocker) Output(args ...string) (string, error) {
@@ -53,7 +59,7 @@ func (d *fakeDocker) Compose(dir, id string, args ...string) error {
 
 func TestAttachedUpDoesNotBlockDown(t *testing.T) {
 	d := &fakeDocker{composeHook: func(dir string, args []string) {
-		if args[0] == "up" {
+		if args[0] == "up" && len(args) == 1 {
 			if _, err := os.Stat(dir + ".lock"); !os.IsNotExist(err) {
 				t.Fatal("attached up holds lifecycle lock, blocking down")
 			}
@@ -87,7 +93,7 @@ func TestLifecycleReusesStateAndKeepsDownNonDestructive(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	want := [][]string{{"config", "--quiet"}, {"up", "-d", "--wait", "--wait-timeout", "120"}, {"ps"}, {"down"}, {"config", "--quiet"}, {"up", "-d", "--wait", "--wait-timeout", "120"}}
+	want := [][]string{{"config", "--quiet"}, {"up", "-d", "--wait", "--wait-timeout", "120", "db"}, {"up", "-d", "--wait", "--wait-timeout", "120"}, {"ps"}, {"down"}, {"config", "--quiet"}, {"up", "-d", "--wait", "--wait-timeout", "120", "db"}, {"up", "-d", "--wait", "--wait-timeout", "120"}}
 	if len(d.calls) != len(want) {
 		t.Fatalf("calls = %v", d.calls)
 	}

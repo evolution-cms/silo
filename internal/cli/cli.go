@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/evolution-cms/silo/internal/bootstrap"
 	"github.com/evolution-cms/silo/internal/docker"
 	"github.com/evolution-cms/silo/internal/project"
 	"github.com/evolution-cms/silo/internal/state"
@@ -29,11 +30,13 @@ Usage:
 
 Run from an Evolution project or any directory below it.
 State: ~/.silo (override with an absolute external SILO_HOME).
-HTTP: http://127.0.0.1:8080 by default; --port selects the first startup port.
+HTTP: http://127.0.0.1:8080 by default; --port sets or changes the saved port.
+Use a different port for each project running at the same time.
 down retains database data. No application configuration is generated.
 `
 
 type driver interface {
+	bootstrap.Runner
 	Output(...string) (string, error)
 	Compose(string, string, ...string) error
 }
@@ -72,7 +75,7 @@ func execute(args []string, version, cwd, home string, d driver, out io.Writer) 
 	if command == "up" {
 		flags.BoolVar(&detach, "d", false, "start in background")
 		flags.BoolVar(&detach, "detach", false, "start in background")
-		flags.IntVar(&port, "port", 0, "HTTP port on first startup (default 8080)")
+		flags.IntVar(&port, "port", 0, "set or change HTTP port (saved per project; initial default 8080)")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -141,9 +144,15 @@ func execute(args []string, version, cwd, home string, d driver, out io.Writer) 
 		return err
 	}
 	fmt.Fprintf(out, "Project: %s\nState: %s\nHTTP: http://127.0.0.1:%d\n", p.Root, s.Dir, m.Port)
-	fmt.Fprintln(out, "Database: isolated local volume; existing application data is not imported.")
+	fmt.Fprintln(out, "Database: isolated local volume; newest backup is restored only on first initialization.")
 	if err := d.Compose(s.Dir, p.ID, "config", "--quiet"); err != nil {
 		return fmt.Errorf("invalid Compose configuration: %w", err)
+	}
+	if err := d.Compose(s.Dir, p.ID, "up", "-d", "--wait", "--wait-timeout", "120", "db"); err != nil {
+		return err
+	}
+	if err := bootstrap.Restore(p.Root, bootstrap.DockerDatabase{Runner: d, Dir: s.Dir, ID: p.ID}, out); err != nil {
+		return err
 	}
 	up := []string{"up"}
 	if detach {

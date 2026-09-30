@@ -53,9 +53,14 @@ func ComposeArgs(dir, id string, args ...string) []string {
 
 // Compose inherits console streams, preserving attached logs and Docker's exit code.
 func (c Client) Compose(dir, id string, args ...string) error {
+	return c.ComposeIO(dir, id, c.In, c.Out, c.Err, args...)
+}
+
+// ComposeIO supports streaming backups without placing SQL or passwords in argv.
+func (c Client) ComposeIO(dir, id string, in io.Reader, out, stderr io.Writer, args ...string) error {
 	cmd := exec.Command("docker", ComposeArgs(dir, id, args...)...)
 	cmd.Dir = dir
 	cmd.Env = Environment(os.Environ())
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = c.In, c.Out, c.Err
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = in, out, stderr
 	return cmd.Run()
 }

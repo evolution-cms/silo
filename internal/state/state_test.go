@@ -59,8 +59,13 @@ func TestStateIsExternalStableAndNonDestructive(t *testing.T) {
 	if string(env1) != string(env2) {
 		t.Fatal("credentials changed on restart")
 	}
-	if _, err := s.Ensure(9000); err == nil {
-		t.Fatal("silently changed existing port")
+	changed, err := s.Ensure(9000)
+	if err != nil || changed.Port != 9000 {
+		t.Fatalf("explicit port update failed: %+v %v", changed, err)
+	}
+	retained, err := s.Ensure(0)
+	if err != nil || retained != changed {
+		t.Fatalf("updated port not retained: %+v %v", retained, err)
 	}
 	entries, err := os.ReadDir(s.Project.Root)
 	if err != nil {
@@ -116,6 +121,103 @@ func TestUnlockIsIdempotent(t *testing.T) {
 	first()
 	if _, err := s.Lock(); err == nil {
 		t.Fatal("repeated unlock removed another process lock")
+	}
+}
+
+func TestPortUpdatePreservesStateAndRepairsInterruptedUpdate(t *testing.T) {
+	s := fixture(t)
+	unlock, err := s.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	m, err := s.Ensure(8123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ := os.ReadFile(filepath.Join(s.Dir, "environment"))
+	runtime, _ := os.ReadFile(filepath.Join(s.Dir, "runtime", "Dockerfile"))
+	path := filepath.Join(s.Dir, "compose.yaml")
+	data, _ := os.ReadFile(path)
+	var model map[string]any
+	if err := json.Unmarshal(data, &model); err != nil {
+		t.Fatal(err)
+	}
+	model["x-test"] = "preserved"
+	data, _ = json.Marshal(model)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := s.Ensure(18123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.Project != m.Project {
+		t.Fatal("project identity changed")
+	}
+	data, _ = os.ReadFile(path)
+	if !strings.Contains(string(data), "127.0.0.1:18123:80") || !strings.Contains(string(data), "preserved") {
+		t.Fatal("binding or unrelated Compose fields lost")
+	}
+	if current, _ := os.ReadFile(filepath.Join(s.Dir, "environment")); string(current) != string(env) {
+		t.Fatal("credentials changed")
+	}
+	if current, _ := os.ReadFile(filepath.Join(s.Dir, "runtime", "Dockerfile")); string(current) != string(runtime) {
+		t.Fatal("runtime changed")
+	}
+	// Simulate interruption after Compose changed but before metadata committed.
+	data = []byte(strings.ReplaceAll(string(data), "127.0.0.1:18123:80", "127.0.0.1:19123:80"))
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Ensure(0); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(path)
+	if !strings.Contains(string(data), "127.0.0.1:18123:80") {
+		t.Fatal("saved metadata did not reconcile interrupted update")
+	}
+	for _, port := range []int{-1, 65536} {
+		if _, err := s.Ensure(port); err == nil {
+			t.Fatal("invalid port accepted")
+		}
+	}
+	if current, _ := os.ReadFile(path); string(current) != string(data) {
+		t.Fatal("invalid port changed Compose")
+	}
+}
+
+func TestPortUpdateRollsBackWhenMetadataCannotBeReplaced(t *testing.T) {
+	s := fixture(t)
+	unlock, err := s.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	m, err := s.Ensure(8123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(filepath.Join(s.Dir, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.Dir, "metadata.json")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.updatePort(m, 18123); err == nil {
+		t.Fatal("metadata replacement failure ignored")
+	}
+	current, err := os.ReadFile(filepath.Join(s.Dir, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(current) != string(original) {
+		t.Fatal("Compose not rolled back")
 	}
 }
 
